@@ -2,12 +2,9 @@
  * 节点信息(落地版)
  *
  * ⚠️ 本脚本用于检测节点【真实出口落地IP】, 而非入口IP
- *
- * 查看说明: https://t.me/zhetengsha/1269
- *
- * 入口版脚本请查看: https://t.me/zhetengsha/1358
- *
- * 欢迎加入 Telegram 群组 https://t.me/zhetengsha
+ * ⚠️ 原外部文档/群组链接境外无法访问，已移除引用
+ * 功能：检测落地IP → 匹配国旗+国家 → 自动追加自增序号(1/2/3...)
+ * 节点最终格式：【国旗 国家 序号】
  *
  * 参数
  * - [retries] 重试次数 默认 1
@@ -20,13 +17,10 @@
  *              数据来自 GeoIP 数据库
  * - [method] 请求方法. 默认 get
  * - [timeout] 请求超时(单位: 毫秒) 默认 5000
- * - [api] 测落地的 API . 默认为: https://api.ipify.org/?format=json
- * - [format] 自定义格式, 从 节点(proxy) 和 落地(api)中取数据. 默认为: {{api.country}} {{api.isp}} - {{proxy.name}}
- *            当使用 internal 时, 默认为 {{api.countryCode}} {{api.aso}} - {{proxy.name}}
- * - [regex] 使用正则表达式从落地 API 响应(api)中取数据. 格式为 a:x;b:y 此时将使用正则表达式 x 和 y 来从 api 中取数据, 赋值给 a 和 b. 然后可在 format 中使用 {{api.a}} 和 {{api.b}}
+ * - [api] 测落地的 API . 默认为: http://ip-api.com/json?lang=zh-CN
+ * - [regex] 使用正则表达式从落地 API 响应(api)中取数据. 格式为 a:x;b:y
  * - [valid] 验证 api 请求是否合法. 默认: ProxyUtils.isIP('{{api.ip || api.query}}')
- *           当使用 internal 时, 默认为 "{{api.countryCode || api.aso}}".length > 0
- * - [uniq_key] 设置缓存唯一键名包含的节点数据字段名匹配正则. 默认为 ^server$ 即服务器地址相同的节点共享缓存
+ * - [uniq_key] 设置缓存唯一键名包含的节点数据字段名匹配正则. 默认为 ^server$
  * - [entrance] 在节点上附加 _entrance 字段(API 响应数据), 默认不附加
  * - [remove_failed] 移除失败的节点. 默认不移除.
  * - [mmdb_country_path] 见 internal
@@ -43,8 +37,28 @@ async function operator(proxies = [], targetPlatform, context) {
   const mmdb_asn_path = $arguments.mmdb_asn_path
   const regex = $arguments.regex
   let valid = $arguments.valid || `ProxyUtils.isIP('{{api.ip || api.query}}')`
-  let format = $arguments.format || `{{api.country}} {{api.isp}} - {{proxy.name}}`
   let utils
+
+  // ========== 国旗+国家+国家代码 映射表（可自行扩展） ==========
+  const countryFlagMap = {
+    US: { flag: "🇺🇸", name: "美国" },
+    SG: { flag: "🇸🇬", name: "新加坡" },
+    JP: { flag: "🇯🇵", name: "日本" },
+    KR: { flag: "🇰🇷", name: "韩国" },
+    CN: { flag: "🇨🇳", name: "中国" },
+    TW: { flag: "🇹🇼", name: "中国台湾" },
+    HK: { flag: "🇭🇰", name: "中国香港" },
+    MO: { flag: "🇲🇴", name: "中国澳门" },
+    GB: { flag: "🇬🇧", name: "英国" },
+    DE: { flag: "🇩🇪", name: "德国" },
+    FR: { flag: "🇫🇷", name: "法国" },
+    AU: { flag: "🇦🇺", name: "澳大利亚" },
+    CA: { flag: "🇨🇦", name: "加拿大" },
+    TH: { flag: "🇹🇭", name: "泰国" },
+    VN: { flag: "🇻🇳", name: "越南" }
+  }
+  // 全局节点序号，从 1 开始自增
+  let nodeIndex = 1
 
   if (internal) {
     if (isNode) {
@@ -60,7 +74,6 @@ async function operator(proxies = [], targetPlatform, context) {
       }
       utils = $utils
     }
-    format = $arguments.format || `{{api.countryCode}} {{api.aso}} - {{proxy.name}}`
     valid = $arguments.valid || `"{{api.countryCode || api.aso}}".length > 0`
   }
 
@@ -72,37 +85,30 @@ async function operator(proxies = [], targetPlatform, context) {
   const cache = scriptResourceCache
   const method = $arguments.method || 'get'
 
-  // ===================== 落地IP检测专用 API =====================
-  const url = $arguments.api || `https://api.ipify.org/?format=json`
-
+  // 替换为国内可正常访问的IP查询接口
+  const url = $arguments.api || `http://ip-api.com/json?lang=zh-CN`
   const concurrency = parseInt($arguments.concurrency || 10)
+
   await executeAsyncTasks(
     proxies.map(proxy => () => check(proxy)),
     { concurrency }
   )
 
   if (remove_failed) {
-    proxies = proxies.filter(p => {
-      if (remove_failed && !p._entrance) {
-        return false
-      }
-      return true
-    })
+    proxies = proxies.filter(p => p._entrance)
   }
 
   if (!entranceEnabled) {
-    proxies = proxies.map(p => {
-      delete p._entrance
-      return p
-    })
+    proxies.forEach(p => delete p._entrance)
   }
 
   return proxies
 
-  // ===================== 核心：通过节点请求落地IP =====================
+  // 核心检测 & 重命名逻辑
   async function check(proxy) {
+    const currentNum = nodeIndex++
     const id = cacheEnabled
-      ? `outbound:${url}:${format}:${regex}:${internal}:${JSON.stringify(
+      ? `outbound:${url}:${regex}:${internal}:${JSON.stringify(
           Object.fromEntries(
             Object.entries(proxy).filter(([key]) => {
               const re = new RegExp(uniq_key)
@@ -117,15 +123,13 @@ async function operator(proxies = [], targetPlatform, context) {
       if (cacheEnabled && cached) {
         if (cached.api) {
           $.info(`[${proxy.name}] 使用成功缓存`)
-          proxy.name = formatter({ proxy, api: cached.api, format, regex })
+          setNodeName(proxy, cached.api, currentNum)
           proxy._entrance = cached.api
           return
+        } else if (disableFailedCache) {
+          $.info(`[${proxy.name}] 不使用失败缓存`)
         } else {
-          if (disableFailedCache) {
-            $.info(`[${proxy.name}] 不使用失败缓存`)
-          } else {
-            return
-          }
+          return
         }
       }
 
@@ -138,14 +142,15 @@ async function operator(proxies = [], targetPlatform, context) {
           aso: utils.ipaso(proxy.server) || '',
         }
         if ((api.countryCode || api.aso) && eval(formatter({ api, format: valid, regex }))) {
-          proxy.name = formatter({ proxy, api, format, regex })
+          setNodeName(proxy, api, currentNum)
           proxy._entrance = api
           if (cacheEnabled) cache.set(id, { api })
         } else {
+          proxy.name = `🌐 未知地区 ${currentNum}`
           if (cacheEnabled) cache.set(id, {})
         }
       } else {
-        // ===================== 通过代理请求落地IP =====================
+        // 通过当前节点代理请求，获取真实落地IP信息
         const res = await $.http[method]({
           url: formatter({ proxy, format: url }),
           proxy: proxy,
@@ -157,20 +162,32 @@ async function operator(proxies = [], targetPlatform, context) {
 
         const status = parseInt(res.status || 200)
         const latency = Date.now() - startedAt
-
         $.info(`[${proxy.name}] 落地IP状态: ${status}, 耗时: ${latency}ms`)
 
-        if (status == 200 && eval(formatter({ api, format: valid, regex }))) {
-          proxy.name = formatter({ proxy, api, format, regex })
+        if (status === 200 && eval(formatter({ api, format: valid, regex }))) {
+          setNodeName(proxy, api, currentNum)
           proxy._entrance = api
           if (cacheEnabled) cache.set(id, { api })
         } else {
+          proxy.name = `🌐 未知地区 ${currentNum}`
           if (cacheEnabled) cache.set(id, {})
         }
       }
     } catch (e) {
       $.error(`[${proxy.name}] 落地IP检测失败: ${e.message ?? e}`)
+      proxy.name = `🌐 未知地区 ${currentNum}`
       if (cacheEnabled) cache.set(id, {})
+    }
+  }
+
+  // 根据国家代码匹配国旗+国家，拼接最终名称：国旗 国家 序号
+  function setNodeName(proxy, api, num) {
+    const countryCode = (api.countryCode || '').toUpperCase()
+    const match = countryFlagMap[countryCode]
+    if (match) {
+      proxy.name = `${match.flag} ${match.name} ${num}`
+    } else {
+      proxy.name = `🌐 未知地区 ${num}`
     }
   }
 
@@ -201,7 +218,6 @@ async function operator(proxies = [], targetPlatform, context) {
       }
       api = { ...api, ...extracted }
     }
-
     let f = format.replace(/\{\{(.*?)\}\}/g, '${$1}')
     return eval(`\`${f}\``)
   }
