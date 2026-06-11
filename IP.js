@@ -38,6 +38,18 @@ async function operator(proxies = [], targetPlatform, context) {
   const regex = $arguments.regex
   let valid = $arguments.valid || `ProxyUtils.isIP('{{api.ip || api.query}}')`
   let utils
+  function isIPv4(ip) {
+  return /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/.test(ip)
+}
+
+function isIPv6(ip) {
+  return /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|::1|::)$/.test(ip) ||
+         /^(([0-9a-fA-F]{1,4}:){1,7}:|:([0-9a-fA-F]{1,4}:){1,7})$/.test(ip)
+}
+
+function isIP(ip) {
+  return isIPv4(ip) || isIPv6(ip)
+}
 
   // ========== 国旗+国家+国家代码 映射表（可自行扩展） ==========
   const countryFlagMap = {
